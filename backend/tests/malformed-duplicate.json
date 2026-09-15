@@ -1,4 +1,0 @@
-[
-  { "endpoint": "POST /users", "kind": "field", "field": "email", "type": "string", "required": true, "enumValues": null, "statusCode": null },
-  { "endpoint": "POST /users", "kind": "field", "field": "email", "type": "integer", "required": false, "enumValues": null, "statusCode": null }
-]
