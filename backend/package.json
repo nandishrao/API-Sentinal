@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "test": "jest",
     "test:watch": "jest --watch"
+    
   },
   "dependencies": {
     "cors": "^2.8.5",
