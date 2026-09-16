@@ -17,29 +17,64 @@ const CLASSIFICATION = {
   AMBIGUOUS: 'ambiguous',
 };
 
-// TODO (Phase 2, TDD): implement each rule against backend/tests/fixtures/before.json
-// and after.json. Each rule name below maps 1:1 to a row in the Phase 0 edge case
-// matrix (docs/phase0/edge-case-matrix) and should have a matching test in
-// diffEngine.test.js before it's implemented.
+// TODO (Phase 2, TDD): 
+const TYPE_WIDENING = {
+  int32: ['int64', 'long'],
+  integer: ['long', 'int64'],
+  short: ['int', 'int32', 'int64', 'integer', 'long'],
+  float: ['double'],
+};
+function isWideningTypeChange(beforeType, afterType) {
+  return (TYPE_WIDENING[beforeType] || []).includes(afterType);
+}
+function statusClass(statusCode) {
+  return Math.floor(statusCode / 100); // 200 -> 2, 404 -> 4, etc.
+}
+function wordsOf(name) {
+  return new Set(
+    name
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/[_\-.]/g, ' ')
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+  );
+}
 
-const rules = [
-  // field removed -> breaking
-  // field added, required -> breaking
-  // field added, optional -> non-breaking
-  // type changed -> breaking
-  // type widened (e.g. int32 -> int64) -> ambiguous
-  // required -> optional -> non-breaking
-  // optional -> required -> breaking
-  // status code removed -> breaking
-  // status code added -> non-breaking
-  // status code changed (same operation) -> breaking
-  // enum value removed -> breaking
-  // enum value added -> non-breaking
-  // field reordering (no key change) -> non-breaking / not reported as a change
-  // endpoint removed entirely -> breaking, reported at endpoint level
-  // endpoint added entirely -> non-breaking
-  // field name casing changed -> ambiguous
-  // possible rename (remove + add, same endpoint/type, similar name) -> ambiguous
-];
+function shareAWord(nameA, nameB) {
+  const a = wordsOf(nameA);
+  for (const w of wordsOf(nameB)) if (a.has(w)) return true;
+  return false;
+}
 
-module.exports = { CLASSIFICATION, rules };
+function classifyModifiedField(before, after) {
+  if (before.type !== after.type) {
+    return isWideningTypeChange(before.type, after.type)
+      ? { classification: CLASSIFICATION.AMBIGUOUS, ruleName: 'type-widened' }
+      : { classification: CLASSIFICATION.BREAKING, ruleName: 'type-changed' };
+  }
+
+  if (before.required !== after.required) {
+    return after.required
+      ? { classification: CLASSIFICATION.BREAKING, ruleName: 'optional-to-required' }
+      : { classification: CLASSIFICATION.NON_BREAKING, ruleName: 'required-to-optional' };
+  }
+
+  if (before.type === 'enum') {
+    const beforeSet = new Set(before.enumValues || []);
+    const afterSet = new Set(after.enumValues || []);
+    const removed = [...beforeSet].filter((v) => !afterSet.has(v));
+    const added = [...afterSet].filter((v) => !beforeSet.has(v));
+    if (removed.length > 0) return { classification: CLASSIFICATION.BREAKING, ruleName: 'enum-value-removed' };
+    if (added.length > 0) return { classification: CLASSIFICATION.NON_BREAKING, ruleName: 'enum-value-added' };
+  }
+
+  return null;
+}
+
+module.exports = {
+  CLASSIFICATION, TYPE_WIDENING, isWideningTypeChange,
+  statusClass, wordsOf, shareAWord, classifyModifiedField,
+};
+
+
