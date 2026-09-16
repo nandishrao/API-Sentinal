@@ -1,41 +1,4 @@
-/**
- * Pure diff engine. No I/O, no Express, no AI client, no MongoDB — see ADR-001.
- *
- * @typedef {Object} Row
- * @property {string} endpoint
- * @property {'field'|'status'} kind
- * @property {string|null} field
- * @property {string|null} type
- * @property {boolean|null} required
- * @property {string[]|null} enumValues
- * @property {number|null} statusCode
- *
- * @typedef {Object} Change
- * @property {string} endpoint
- * @property {string} key            composite key, e.g. "POST /users::field::password"
- * @property {'field'|'status'|'endpoint'} scope
- * @property {'breaking'|'non-breaking'|'ambiguous'} classification
- * @property {string} ruleName       matches an entry in rules.js — used for testing and for the AI prompt
- * @property {Row|null} before
- * @property {Row|null} after
- *
- * @param {Row[]} beforeRows
- * @param {Row[]} afterRows
- * @returns {Change[]}
- */
-function diff(beforeRows, afterRows) {
-  // TODO (Phase 2):
-  // 1. validateRows(beforeRows) / validateRows(afterRows) — throw on duplicate
-  //    composite keys or empty input (edge cases #17, #18). Validation happens
-  //    here, not in the Express layer, so the engine stays usable standalone.
-  // 2. Index both arrays by composite key (see docs/data-model.md).
-  // 3. Walk the union of keys; for each, look up the applicable rule(s) from
-  //    rules.js and produce a Change (or nothing, for no-op changes like
-  //    reordering).
-  // 4. Roll up endpoint-level removal/addition separately from field-level
-  //    changes (edge cases #15, #16).
-  throw new Error('diffEngine.diff() not yet implemented — Phase 2');
-}
+const { CLASSIFICATION, statusClass, shareAWord, classifyModifiedField } = require('./rules');
 
 function compositeKey(row) {
   return row.kind === 'status'
@@ -43,4 +6,181 @@ function compositeKey(row) {
     : `${row.endpoint}::field::${row.field}`;
 }
 
-module.exports = { diff, compositeKey };
+function validateRows(rows, label) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error(`${label} must be a non-empty array (edge case #18)`);
+  }
+  const seen = new Set();
+  for (const row of rows) {
+    const key = compositeKey(row);
+    if (seen.has(key)) throw new Error(`Duplicate composite key "${key}" in ${label} (edge case #17)`);
+    seen.add(key);
+  }
+}
+
+function groupByEndpoint(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    if (!map.has(row.endpoint)) map.set(row.endpoint, []);
+    map.get(row.endpoint).push(row);
+  }
+  return map;
+}
+
+function diffFields(endpoint, beforeFields, afterFields, changes) {
+  const beforeByName = new Map(beforeFields.map((r) => [r.field, r]));
+  const afterByName = new Map(afterFields.map((r) => [r.field, r]));
+
+  // 1) Case-only rename (#19) — ambiguous, not auto-resolved
+  for (const [bName, bRow] of [...beforeByName]) {
+    for (const [aName, aRow] of [...afterByName]) {
+      if (bName !== aName && bName.toLowerCase() === aName.toLowerCase()) {
+        changes.push({
+          endpoint, scope: 'field', key: `${endpoint}::field::${bName}`,
+          classification: CLASSIFICATION.AMBIGUOUS, ruleName: 'field-casing-changed',
+          before: bRow, after: aRow,
+        });
+        beforeByName.delete(bName);
+        afterByName.delete(aName);
+      }
+    }
+  }
+
+  // 2) Same exact name in both -> modified or unchanged (indexing by name, not
+  //    position, is what makes reordering (#14) a no-op)
+  for (const [name, bRow] of [...beforeByName]) {
+    if (afterByName.has(name)) {
+      const aRow = afterByName.get(name);
+      const result = classifyModifiedField(bRow, aRow);
+      if (result) {
+        changes.push({
+          endpoint, scope: 'field', key: `${endpoint}::field::${name}`,
+          classification: result.classification, ruleName: result.ruleName,
+          before: bRow, after: aRow,
+        });
+      }
+      beforeByName.delete(name);
+      afterByName.delete(name);
+    }
+  }
+
+  // 3) What's left is a pure removal or addition — try to pair as a likely
+  //    rename (#11) before falling back to independent removed/added
+  const remainingRemoved = [...beforeByName.values()];
+  const remainingAdded = [...afterByName.values()];
+  const pairedAdded = new Set();
+
+  for (const removedRow of remainingRemoved) {
+    const match = remainingAdded.find(
+      (a) => !pairedAdded.has(a.field) && a.type === removedRow.type && shareAWord(removedRow.field, a.field)
+    );
+    if (match) {
+      pairedAdded.add(match.field);
+      changes.push({
+        endpoint, scope: 'field', key: `${endpoint}::field::${removedRow.field}->${match.field}`,
+        classification: CLASSIFICATION.AMBIGUOUS, ruleName: 'possible-rename',
+        before: removedRow, after: match,
+      });
+    } else {
+      changes.push({
+        endpoint, scope: 'field', key: `${endpoint}::field::${removedRow.field}`,
+        classification: CLASSIFICATION.BREAKING, ruleName: 'field-removed',
+        before: removedRow, after: null,
+      });
+    }
+  }
+
+  for (const addedRow of remainingAdded) {
+    if (pairedAdded.has(addedRow.field)) continue;
+    changes.push({
+      endpoint, scope: 'field', key: `${endpoint}::field::${addedRow.field}`,
+      classification: addedRow.required ? CLASSIFICATION.BREAKING : CLASSIFICATION.NON_BREAKING,
+      ruleName: addedRow.required ? 'field-added-required' : 'field-added-optional',
+      before: null, after: addedRow,
+    });
+  }
+}
+
+function diffStatuses(endpoint, beforeStatuses, afterStatuses, changes) {
+  const beforeCodes = beforeStatuses.map((r) => r.statusCode);
+  const afterCodes = afterStatuses.map((r) => r.statusCode);
+  const beforeSet = new Set(beforeCodes);
+  const afterSet = new Set(afterCodes);
+  const removed = beforeCodes.filter((c) => !afterSet.has(c));
+  const added = afterCodes.filter((c) => !beforeSet.has(c));
+
+  // Pair a removed+added status within the same class (2xx/4xx/5xx) as one
+  // "status code changed" event (#10) rather than two unrelated add/removes.
+  const classes = new Set([...removed, ...added].map(statusClass));
+  for (const cls of classes) {
+    const removedInClass = removed.filter((c) => statusClass(c) === cls);
+    const addedInClass = added.filter((c) => statusClass(c) === cls);
+
+    if (removedInClass.length === 1 && addedInClass.length === 1) {
+      const [oldCode] = removedInClass;
+      const [newCode] = addedInClass;
+      changes.push({
+        endpoint, scope: 'status', key: `${endpoint}::status::${oldCode}->${newCode}`,
+        classification: CLASSIFICATION.BREAKING, ruleName: 'status-code-changed',
+        before: beforeStatuses.find((r) => r.statusCode === oldCode),
+        after: afterStatuses.find((r) => r.statusCode === newCode),
+      });
+    } else {
+      for (const code of removedInClass) {
+        changes.push({
+          endpoint, scope: 'status', key: `${endpoint}::status::${code}`,
+          classification: CLASSIFICATION.BREAKING, ruleName: 'status-code-removed',
+          before: beforeStatuses.find((r) => r.statusCode === code), after: null,
+        });
+      }
+      for (const code of addedInClass) {
+        changes.push({
+          endpoint, scope: 'status', key: `${endpoint}::status::${code}`,
+          classification: CLASSIFICATION.NON_BREAKING, ruleName: 'status-code-added',
+          before: null, after: afterStatuses.find((r) => r.statusCode === code),
+        });
+      }
+    }
+  }
+}
+
+function diff(beforeRows, afterRows) {
+  validateRows(beforeRows, 'beforeRows');
+  validateRows(afterRows, 'afterRows');
+
+  const changes = [];
+  const beforeByEndpoint = groupByEndpoint(beforeRows);
+  const afterByEndpoint = groupByEndpoint(afterRows);
+  const allEndpoints = new Set([...beforeByEndpoint.keys(), ...afterByEndpoint.keys()]);
+
+  for (const endpoint of allEndpoints) {
+    const inBefore = beforeByEndpoint.has(endpoint);
+    const inAfter = afterByEndpoint.has(endpoint);
+
+    if (inBefore && !inAfter) {
+      changes.push({
+        endpoint, scope: 'endpoint', key: `${endpoint}::endpoint`,
+        classification: CLASSIFICATION.BREAKING, ruleName: 'endpoint-removed',
+        before: beforeByEndpoint.get(endpoint), after: null,
+      });
+      continue;
+    }
+    if (!inBefore && inAfter) {
+      changes.push({
+        endpoint, scope: 'endpoint', key: `${endpoint}::endpoint`,
+        classification: CLASSIFICATION.NON_BREAKING, ruleName: 'endpoint-added',
+        before: null, after: afterByEndpoint.get(endpoint),
+      });
+      continue;
+    }
+
+    const b = beforeByEndpoint.get(endpoint);
+    const a = afterByEndpoint.get(endpoint);
+    diffFields(endpoint, b.filter((r) => r.kind === 'field'), a.filter((r) => r.kind === 'field'), changes);
+    diffStatuses(endpoint, b.filter((r) => r.kind === 'status'), a.filter((r) => r.kind === 'status'), changes);
+  }
+
+  return changes;
+}
+
+module.exports = { diff, compositeKey, validateRows };
