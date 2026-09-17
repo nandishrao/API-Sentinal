@@ -6,15 +6,17 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "jest",
-    "test:watch": "jest --watch"
-    
+    "test": "NODE_ENV=test jest",
+    "test:watch": "NODE_ENV=test jest --watch"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "bcryptjs": "^2.4.3",
     "express": "^4.19.2",
-    "mongoose": "^8.5.0"
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.5.0",
+    "pdfkit": "^0.15.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",
