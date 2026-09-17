@@ -17,7 +17,12 @@ function isPersistenceAvailable() {
   return mongoose.connection.readyState === 1; // 1 === connected
 }
 
-async function executeRun(beforeRows, afterRows) {
+/**
+ * Orchestrates one comparison run: diff -> explain -> summarize -> persist.
+ * Lives in a service rather than the route so the route stays a transport
+ * adapter and this flow is testable without HTTP.
+ */
+async function executeRun(beforeRows, afterRows, userId = null) {
   const startedAt = Date.now();
 
   // Throws on malformed input (#17, #18); the caller maps it to a 422.
@@ -39,7 +44,7 @@ async function executeRun(beforeRows, afterRows) {
   let runId = null;
   if (isPersistenceAvailable()) {
     try {
-      const run = await Run.create({ beforeRows, afterRows, changes: changesWithExplanations, summary });
+      const run = await Run.create({ userId, beforeRows, afterRows, changes: changesWithExplanations, summary });
       runId = run._id;
     } catch (err) {
       logger.error('run.persist.failed', { reason: err.message });
@@ -49,8 +54,13 @@ async function executeRun(beforeRows, afterRows) {
   }
 
   logger.info('run.completed', {
-    runId, beforeRowCount: beforeRows.length, afterRowCount: afterRows.length,
-    ...summary, aiDegraded, persisted: runId !== null, latencyMs: Date.now() - startedAt,
+    runId,
+    beforeRowCount: beforeRows.length,
+    afterRowCount: afterRows.length,
+    ...summary,
+    aiDegraded,
+    persisted: runId !== null,
+    latencyMs: Date.now() - startedAt,
   });
 
   return { runId, changes: changesWithExplanations, summary, aiDegraded, persisted: runId !== null };
