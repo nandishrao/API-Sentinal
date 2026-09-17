@@ -3,24 +3,41 @@ import TableInput from './components/TableInput';
 import SummaryBar from './components/SummaryBar';
 import ChangeList from './components/ChangeList';
 import RunHistory from './components/RunHistory';
-import { submitRun, messageFromError } from './api/client';
+import AuthBar from './components/AuthBar';
+import { submitRun, downloadRunAsPdf, messageFromError } from './api/client';
 
 export default function App() {
+  const [username, setUsername] = useState(() => localStorage.getItem('abcd_username'));
   const [tab, setTab] = useState('new'); // 'new' | 'history'
   const [result, setResult] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState(null);
 
   async function handleSubmit(beforeRows, afterRows) {
     setSubmitting(true);
     setError(null);
     try {
-      setResult(await submitRun(beforeRows, afterRows));
+      const data = await submitRun(beforeRows, afterRows);
+      setResult(data);
     } catch (err) {
       setError(messageFromError(err));
       setResult(null);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleExportPdf() {
+    if (!result) return;
+    setExporting(true);
+    setError(null);
+    try {
+      await downloadRunAsPdf(result.changes, result.summary);
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -37,28 +54,58 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', height: '100vh' }}>
-      <aside style={{ width: 320, flexShrink: 0, borderRight: '1px solid var(--border)', padding: 24, overflowY: 'auto' }}>
+      <aside
+        style={{
+          width: 320,
+          flexShrink: 0,
+          borderRight: '1px solid var(--border)',
+          padding: 24,
+          overflowY: 'auto',
+        }}
+      >
         <h1 style={{ fontSize: 16, margin: '0 0 4px' }}>API Breaking Change Detector</h1>
         <p style={{ fontSize: 12, color: 'var(--ink-muted)', margin: '0 0 20px' }}>
           Compares two API contract tables and flags breaking changes.
         </p>
 
+        <AuthBar username={username} onAuthed={setUsername} onSignOut={() => setUsername(null)} />
+
         <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: '1px solid var(--border)' }}>
-          {[{ key: 'new', label: 'New run' }, { key: 'history', label: 'History' }].map((t) => (
-            <button key={t.key} onClick={() => setTab(t.key)} style={{
-              flex: 1, background: 'none', border: 'none',
-              borderBottom: tab === t.key ? '2px solid var(--accent)' : '2px solid transparent',
-              padding: '8px 0', fontWeight: tab === t.key ? 600 : 400,
-              color: tab === t.key ? 'var(--ink)' : 'var(--ink-muted)',
-            }}>{t.label}</button>
+          {[
+            { key: 'new', label: 'New run' },
+            { key: 'history', label: 'History' },
+          ].map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              style={{
+                flex: 1,
+                background: 'none',
+                border: 'none',
+                borderBottom: tab === t.key ? '2px solid var(--accent)' : '2px solid transparent',
+                padding: '8px 0',
+                fontWeight: tab === t.key ? 600 : 400,
+                color: tab === t.key ? 'var(--ink)' : 'var(--ink-muted)',
+              }}
+            >
+              {t.label}
+            </button>
           ))}
         </div>
 
         {tab === 'new' ? (
           <>
             <TableInput onSubmit={handleSubmit} submitting={submitting} />
-            {error && <p style={{ color: 'var(--breaking)', fontSize: 13, marginTop: 12 }}>{error}</p>}
-            <SummaryBar summary={result?.summary} aiDegraded={result?.aiDegraded} persisted={result?.persisted} />
+            {error && (
+              <p style={{ color: 'var(--breaking)', fontSize: 13, marginTop: 12 }}>{error}</p>
+            )}
+            <SummaryBar
+              summary={result?.summary}
+              aiDegraded={result?.aiDegraded}
+              persisted={result?.persisted}
+              onExportPdf={result ? handleExportPdf : null}
+              exporting={exporting}
+            />
           </>
         ) : (
           <RunHistory onSelectRun={handleSelectHistoryRun} />
