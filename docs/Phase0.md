@@ -165,9 +165,5 @@ Full SDLC, compressed to fit an 8–10hr build without becoming theatre:
 | 4 | API layer + AI integration | Express routes, validation, explanation service w/ fallback | `phase4-api-ai.md` |
 | 5 | Frontend | Upload/paste UI, results view, history view | `phase5-frontend.md` |
 | 6 | Integration testing + polish | End-to-end run, error-path testing, README | `phase6-testing.md` |
-| 7 | Demo rehearsal + buffer | Recorded practice run, timing check, buffer for whatever broke on day 6 | `demo-script.md` |
 
-Each phase doc should be short: what was built, why, what it cost in time, what you'd change with more time. Resist the urge to write essays — three architects will judge the clarity of a half-page more highly than the length of five.
-
----
 
