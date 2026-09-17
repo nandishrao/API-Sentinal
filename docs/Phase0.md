@@ -148,8 +148,8 @@ Full SDLC, compressed to fit an 8–10hr build without becoming theatre:
 3. **Core diff engine, test-first** — write the edge-case tests from §4 before the implementation. This is the phase where "process" is most visible to a reviewer who asks to see your commit history
 4. **API layer** — thin Express layer wrapping the engine, input validation
 5. **AI integration** — isolated service, mockable, with a fallback path
-6. **Frontend** — results view first (this is the demo surface), history view second
-7. **Testing pass** — confirm every §4 row has a passing test; add a couple of API-level integration tests
+6. **Frontend** — results view first, history view second 
+7. **Testing pass** — confirm every §4 row has a passing test; add a couple of API-level integration tests (check with demo before & after data)
 8. **Documentation** — README, ADR log, assumptions list, "what I'd do with more time" section
 9. **Demo rehearsal** — walk through §9 below out loud, twice
 
