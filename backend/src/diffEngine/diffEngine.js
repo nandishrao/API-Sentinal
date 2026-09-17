@@ -1,4 +1,4 @@
-const { CLASSIFICATION, statusClass, shareAWord, classifyModifiedField } = require('./rules');
+const { CLASSIFICATION, statusClass, shareAWord, classifyModifiedField, renameConfidence, confidenceLabel } = require('./rules');
 
 function compositeKey(row) {
   return row.kind === 'status'
@@ -13,7 +13,9 @@ function validateRows(rows, label) {
   const seen = new Set();
   for (const row of rows) {
     const key = compositeKey(row);
-    if (seen.has(key)) throw new Error(`Duplicate composite key "${key}" in ${label} (edge case #17)`);
+    if (seen.has(key)) {
+      throw new Error(`Duplicate composite key "${key}" in ${label} (edge case #17)`);
+    }
     seen.add(key);
   }
 }
@@ -27,11 +29,13 @@ function groupByEndpoint(rows) {
   return map;
 }
 
+/** Field-level diff for one endpoint. Mutates `changes` in place. */
 function diffFields(endpoint, beforeFields, afterFields, changes) {
   const beforeByName = new Map(beforeFields.map((r) => [r.field, r]));
   const afterByName = new Map(afterFields.map((r) => [r.field, r]));
 
-  // 1) Case-only rename (#19) — ambiguous, not auto-resolved
+  // 1) Case-only rename (#19): same name ignoring case, different exact name.
+  //    Deliberately ambiguous, not auto-resolved — see docs/adr.
   for (const [bName, bRow] of [...beforeByName]) {
     for (const [aName, aRow] of [...afterByName]) {
       if (bName !== aName && bName.toLowerCase() === aName.toLowerCase()) {
@@ -46,8 +50,8 @@ function diffFields(endpoint, beforeFields, afterFields, changes) {
     }
   }
 
-  // 2) Same exact name in both -> modified or unchanged (indexing by name, not
-  //    position, is what makes reordering (#14) a no-op)
+  // 2) Fields present under the same exact name in both -> modified or unchanged.
+  //    Indexing by name (not array position) is what makes reordering (#14) a no-op.
   for (const [name, bRow] of [...beforeByName]) {
     if (afterByName.has(name)) {
       const aRow = afterByName.get(name);
@@ -64,22 +68,27 @@ function diffFields(endpoint, beforeFields, afterFields, changes) {
     }
   }
 
-  // 3) What's left is a pure removal or addition — try to pair as a likely
-  //    rename (#11) before falling back to independent removed/added
+  // 3) What's left is a pure removal or addition. Try to pair them as a likely
+  //    rename (#11) before falling back to independent removed/added.
   const remainingRemoved = [...beforeByName.values()];
   const remainingAdded = [...afterByName.values()];
   const pairedAdded = new Set();
 
   for (const removedRow of remainingRemoved) {
     const match = remainingAdded.find(
-      (a) => !pairedAdded.has(a.field) && a.type === removedRow.type && shareAWord(removedRow.field, a.field)
+      (addedRow) =>
+        !pairedAdded.has(addedRow.field) &&
+        addedRow.type === removedRow.type &&
+        shareAWord(removedRow.field, addedRow.field)
     );
     if (match) {
       pairedAdded.add(match.field);
+      const confidence = renameConfidence(removedRow, match);
       changes.push({
         endpoint, scope: 'field', key: `${endpoint}::field::${removedRow.field}->${match.field}`,
         classification: CLASSIFICATION.AMBIGUOUS, ruleName: 'possible-rename',
         before: removedRow, after: match,
+        confidence, confidenceLabel: confidenceLabel(confidence),
       });
     } else {
       changes.push({
@@ -101,16 +110,20 @@ function diffFields(endpoint, beforeFields, afterFields, changes) {
   }
 }
 
+/** Status-code diff for one endpoint. Mutates `changes` in place. */
 function diffStatuses(endpoint, beforeStatuses, afterStatuses, changes) {
   const beforeCodes = beforeStatuses.map((r) => r.statusCode);
   const afterCodes = afterStatuses.map((r) => r.statusCode);
   const beforeSet = new Set(beforeCodes);
   const afterSet = new Set(afterCodes);
+
   const removed = beforeCodes.filter((c) => !afterSet.has(c));
   const added = afterCodes.filter((c) => !beforeSet.has(c));
 
-  // Pair a removed+added status within the same class (2xx/4xx/5xx) as one
-  // "status code changed" event (#10) rather than two unrelated add/removes.
+  // Pair a removed+added status within the same class (2xx/4xx/5xx) as a
+  // single "status code changed" event (#10), rather than as two unrelated
+  // add/remove events. Anything left over is an independent add (#9) or
+  // remove (#8). This mirrors the field-rename heuristic above.
   const classes = new Set([...removed, ...added].map(statusClass));
   for (const cls of classes) {
     const removedInClass = removed.filter((c) => statusClass(c) === cls);
@@ -144,6 +157,11 @@ function diffStatuses(endpoint, beforeStatuses, afterStatuses, changes) {
   }
 }
 
+/**
+ * @param {Array} beforeRows
+ * @param {Array} afterRows
+ * @returns {Array} Change[]
+ */
 function diff(beforeRows, afterRows) {
   validateRows(beforeRows, 'beforeRows');
   validateRows(afterRows, 'afterRows');
@@ -157,6 +175,9 @@ function diff(beforeRows, afterRows) {
     const inBefore = beforeByEndpoint.has(endpoint);
     const inAfter = afterByEndpoint.has(endpoint);
 
+    // Whole-endpoint removal/addition (#15, #16) reported once at endpoint
+    // scope — deliberately skips field/status diffing for that endpoint to
+    // avoid redundant noise on top of the single endpoint-level change.
     if (inBefore && !inAfter) {
       changes.push({
         endpoint, scope: 'endpoint', key: `${endpoint}::endpoint`,
@@ -174,10 +195,21 @@ function diff(beforeRows, afterRows) {
       continue;
     }
 
-    const b = beforeByEndpoint.get(endpoint);
-    const a = afterByEndpoint.get(endpoint);
-    diffFields(endpoint, b.filter((r) => r.kind === 'field'), a.filter((r) => r.kind === 'field'), changes);
-    diffStatuses(endpoint, b.filter((r) => r.kind === 'status'), a.filter((r) => r.kind === 'status'), changes);
+    const beforeRowsForEndpoint = beforeByEndpoint.get(endpoint);
+    const afterRowsForEndpoint = afterByEndpoint.get(endpoint);
+
+    diffFields(
+      endpoint,
+      beforeRowsForEndpoint.filter((r) => r.kind === 'field'),
+      afterRowsForEndpoint.filter((r) => r.kind === 'field'),
+      changes
+    );
+    diffStatuses(
+      endpoint,
+      beforeRowsForEndpoint.filter((r) => r.kind === 'status'),
+      afterRowsForEndpoint.filter((r) => r.kind === 'status'),
+      changes
+    );
   }
 
   return changes;
