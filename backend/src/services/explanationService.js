@@ -1,7 +1,12 @@
 const aiClient = require('./aiClient');
 const logger = require('../config/logger');
 
-// this prompt will be changed and nurtured based on the response quality depending on the model used
+/**
+ * The ONLY place in the system that talks to an AI provider (ADR-002).
+ * Receives changes the diff engine has ALREADY classified and asks for
+ * plain-English phrasing. It never asks the model to classify, and it
+ * discards any attempt by the model to disagree with the classification.
+ */
 
 const SYSTEM_PROMPT = `You are an API contract reviewer writing short explanations for API testers.
 
@@ -16,28 +21,39 @@ Rules:
 Respond with ONLY a JSON array, no preamble and no code fences:
 [{"key": "<the exact key given to you>", "explanation": "<your explanation>"}]`;
 
-
-/** Strip to only what the model needs — never send full rows or internal state. */
+/** Strip only what the model needs — never send full rows or internal state. */
 function toPromptPayload(changes) {
   return changes.map((c) => ({
-    key: c.key, endpoint: c.endpoint, scope: c.scope,
-    classification: c.classification, ruleName: c.ruleName,
+    key: c.key,
+    endpoint: c.endpoint,
+    scope: c.scope,
+    classification: c.classification,
+    ruleName: c.ruleName,
+    // Only present on possible-rename changes (Phase 6) — lets the model
+    // mention confidence in its phrasing without being able to set it.
+    confidenceLabel: c.confidenceLabel ?? undefined,
     before: c.before && !Array.isArray(c.before)
-      ? { field: c.before.field, type: c.before.type, required: c.before.required, enumValues: c.before.enumValues, statusCode: c.before.statusCode } : null,
+      ? { field: c.before.field, type: c.before.type, required: c.before.required, enumValues: c.before.enumValues, statusCode: c.before.statusCode }
+      : null,
     after: c.after && !Array.isArray(c.after)
-      ? { field: c.after.field, type: c.after.type, required: c.after.required, enumValues: c.after.enumValues, statusCode: c.after.statusCode } : null,
+      ? { field: c.after.field, type: c.after.type, required: c.after.required, enumValues: c.after.enumValues, statusCode: c.after.statusCode }
+      : null,
   }));
 }
 
 /**
- * Parse and validate the model's response. Anything not matching exactly is
- * discarded rather than trusted — a malformed AI response must degrade to the
- * fallback, never corrupt output.
+ * Parse and validate the model's response against the expected schema.
+ * Anything that doesn't match exactly is discarded rather than trusted —
+ * a malformed AI response must degrade to the fallback, never corrupt output.
  */
 function parseResponse(raw, validKeys) {
   const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
   let parsed;
-  try { parsed = JSON.parse(cleaned); } catch { throw new Error('AI response was not valid JSON'); }
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    throw new Error('AI response was not valid JSON');
+  }
   if (!Array.isArray(parsed)) throw new Error('AI response was not a JSON array');
 
   const map = new Map();
@@ -50,27 +66,45 @@ function parseResponse(raw, validKeys) {
   return map;
 }
 
+/**
+ * @param {Array} changes
+ * @returns {Promise<Map<string,string>>} key -> explanation. Empty Map on any
+ *          failure — callers MUST have a fallback and must never treat a
+ *          failure here as fatal (ADR-002).
+ */
 async function generateExplanations(changes) {
   if (!Array.isArray(changes) || changes.length === 0) return new Map();
 
   const startedAt = Date.now();
   try {
-    const raw = await aiClient.complete(SYSTEM_PROMPT, JSON.stringify(toPromptPayload(changes), null, 2));
-    const map = parseResponse(raw, new Set(changes.map((c) => c.key)));
-    logger.info('ai.explanations.ok', { changeCount: changes.length, explainedCount: map.size, latencyMs: Date.now() - startedAt });
+    const payload = toPromptPayload(changes);
+    const raw = await aiClient.complete(SYSTEM_PROMPT, JSON.stringify(payload, null, 2));
+    const validKeys = new Set(changes.map((c) => c.key));
+    const map = parseResponse(raw, validKeys);
+
+    logger.info('ai.explanations.ok', {
+      changeCount: changes.length,
+      explainedCount: map.size,
+      latencyMs: Date.now() - startedAt,
+    });
     return map;
   } catch (err) {
-    // Deliberate: log and degrade, never throw (ADR-002).
-    logger.error('ai.explanations.failed', { changeCount: changes.length, latencyMs: Date.now() - startedAt, reason: err.message });
+    // Deliberate: log and degrade, never throw. The categorized diff and
+    // summary remain fully usable with zero AI availability.
+    logger.error('ai.explanations.failed', {
+      changeCount: changes.length,
+      latencyMs: Date.now() - startedAt,
+      reason: err.message,
+    });
     return new Map();
   }
 }
 
-// => This pre-defined rule helps if in case AI is not able to generate an explanation. 
-// => This will be updated with more scenarios with polished explanation from the past 
-// detection of ai failure in the future.
-
-
+/**
+ * Rules-authored fallback, used when the AI call fails entirely or when a
+ * specific change is missing from an otherwise-valid response. Every rule
+ * name has deterministic prose, so the product is never blank.
+ */
 const FALLBACK_BY_RULE = {
   'field-removed': (c) => `Field "${c.before.field}" was removed from ${c.endpoint}. Any client still reading this field will break.`,
   'field-added-required': (c) => `A new required field "${c.after.field}" was added to ${c.endpoint}. Existing clients do not send it, so their requests will now fail validation.`,
@@ -81,7 +115,7 @@ const FALLBACK_BY_RULE = {
   'required-to-optional': (c) => `Field "${c.before.field}" on ${c.endpoint} became optional. Existing clients that always send it are unaffected.`,
   'enum-value-removed': (c) => `One or more allowed values were removed from "${c.before.field}" on ${c.endpoint}. Clients sending a removed value will be rejected.`,
   'enum-value-added': (c) => `A new allowed value was added to "${c.before.field}" on ${c.endpoint}. Existing values still work.`,
-  'possible-rename': (c) => `Field "${c.before.field}" disappeared and "${c.after.field}" appeared on ${c.endpoint} with the same type. This may be a rename — confirm before treating it as a removal.`,
+  'possible-rename': (c) => `Field "${c.before.field}" disappeared and "${c.after.field}" appeared on ${c.endpoint} with the same type (${c.confidenceLabel ?? 'unscored'} confidence rename, score ${c.confidence ?? 'n/a'}). This may be a rename — confirm before treating it as a removal.`,
   'field-casing-changed': (c) => `Field "${c.before.field}" on ${c.endpoint} changed casing to "${c.after.field}". Impact depends on whether the API is case-sensitive.`,
   'status-code-removed': (c) => `${c.endpoint} no longer returns status ${c.before.statusCode}. Clients with handling for that code have untested behaviour now.`,
   'status-code-added': (c) => `${c.endpoint} can now return status ${c.after.statusCode}. Existing handling is unaffected, but the new path may be unhandled.`,
@@ -92,7 +126,13 @@ const FALLBACK_BY_RULE = {
 
 function fallbackExplanation(change) {
   const fn = FALLBACK_BY_RULE[change.ruleName];
-  if (fn) { try { return fn(change); } catch { /* fall through */ } }
+  if (fn) {
+    try {
+      return fn(change);
+    } catch {
+      /* fall through to the generic form below */
+    }
+  }
   return `${change.endpoint}: ${change.ruleName} — classified as ${change.classification}.`;
 }
 
