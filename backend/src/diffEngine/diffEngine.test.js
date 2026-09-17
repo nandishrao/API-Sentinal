@@ -69,6 +69,28 @@ describe('diffEngine — classification rules', () => {
   test('#11 field removed + field added, same endpoint/type -> ambiguous possible-rename (fullName -> displayName)', () => {
     const c = byKey('GET /users/{id}::field::fullName->displayName');
     expect(c).toMatchObject({ classification: 'ambiguous', ruleName: 'possible-rename' });
+    // Phase 6: rename pairing now carries a confidence score, not just a verdict.
+    // fullName/displayName share one word ("name") out of three across both
+    // names, both optional, similar length -> a real but not certain signal.
+    expect(c.confidence).toBeCloseTo(0.56, 2);
+    expect(c.confidenceLabel).toBe('medium');
+  });
+
+  test('#11b rename confidence scales with name similarity (high-confidence case)', () => {
+    const result = diff(
+      [{ endpoint: 'GET /profile', kind: 'field', field: 'userEmail', type: 'string', required: false, enumValues: null, statusCode: null }],
+      [{ endpoint: 'GET /profile', kind: 'field', field: 'userEmailAddress', type: 'string', required: false, enumValues: null, statusCode: null }]
+    );
+    expect(result[0]).toMatchObject({ ruleName: 'possible-rename', confidenceLabel: 'high' });
+    expect(result[0].confidence).toBeGreaterThanOrEqual(0.7);
+  });
+
+  test('#11c no shared word between a removal and an addition -> reported independently, not paired', () => {
+    // password/referralCode fixture pair: both string+required, zero word
+    // overlap. Confirms the confidence scorer never overrides the shareAWord
+    // gate — same type and same required flag alone must not trigger a rename.
+    expect(byKey('POST /users::field::password')).toMatchObject({ ruleName: 'field-removed' });
+    expect(byKey('POST /users::field::referralCode')).toMatchObject({ ruleName: 'field-added-required' });
   });
 
   test('#12 enum value removed -> breaking (POST /users.role: guest removed)', () => {
