@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { streamRunAsPdf } = require('../reports/pdfReport');
+const { streamRunAsPdf } = require('../reports/pdfReports');
 
 /**
  * POST /api/reports/pdf
