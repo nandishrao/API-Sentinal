@@ -28,7 +28,7 @@ export async function submitRun(beforeRows, afterRows) {
 }
 
 export async function fetchRunHistory() {
-  const { data } = await client.get('/runs');
+  const { data } = await client.get('/run');
   return data;
 }
 
@@ -43,7 +43,7 @@ export async function login(username, password) {
 }
 
 export async function fetchRun(id) {
-  const { data } = await client.get(`/runs/${id}`);
+  const { data } = await client.get(`/run/${id}`);
   return data;
 }
 
