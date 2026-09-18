@@ -16,7 +16,7 @@ describe('POST /api/runs — happy path', () => {
   test('returns changes, summary and explanations', async () => {
     aiClient.complete.mockResolvedValue('[]'); // valid response, no explanations -> fallbacks used
 
-    const res = await request(app).post('/api/runs').send({ beforeRows: before, afterRows: after });
+    const res = await request(app).post('/api/run').send({ beforeRows: before, afterRows: after });
 
     expect(res.status).toBe(200);
     expect(res.body.summary).toEqual({ totalChanges: 14, breakingCount: 7, nonBreakingCount: 4, ambiguousCount: 3 });
@@ -32,7 +32,7 @@ describe('POST /api/runs — happy path', () => {
       { key: 'POST /users::field::password', explanation: 'AI-written text.' },
     ]));
 
-    const res = await request(app).post('/api/runs').send({ beforeRows: before, afterRows: after });
+    const res = await request(app).post('/api/run').send({ beforeRows: before, afterRows: after });
     const aiOne = res.body.changes.find((c) => c.key === 'POST /users::field::password');
     const fallbackOne = res.body.changes.find((c) => c.key !== 'POST /users::field::password');
 
@@ -45,7 +45,7 @@ describe('POST /api/runs — AI failure degrades gracefully (ADR-002)', () => {
   test('still returns the full categorized diff when the AI provider is down', async () => {
     aiClient.complete.mockRejectedValue(new Error('provider unreachable'));
 
-    const res = await request(app).post('/api/runs').send({ beforeRows: before, afterRows: after });
+    const res = await request(app).post('/api/run').send({ beforeRows: before, afterRows: after });
 
     expect(res.status).toBe(200);
     expect(res.body.summary.totalChanges).toBe(14);
@@ -59,12 +59,12 @@ describe('POST /api/runs — AI failure degrades gracefully (ADR-002)', () => {
 
 describe('POST /api/runs — validation', () => {
   test('400 when beforeRows is not an array', async () => {
-    const res = await request(app).post('/api/runs').send({ beforeRows: 'nope', afterRows: after });
+    const res = await request(app).post('/api/run').send({ beforeRows: 'nope', afterRows: after });
     expect(res.status).toBe(400);
   });
 
   test('400 with per-row details when rows are malformed', async () => {
-    const res = await request(app).post('/api/runs').send({
+    const res = await request(app).post('/api/run').send({
       beforeRows: [{ endpoint: 'POST /users', kind: 'field' }],
       afterRows: after,
     });
@@ -73,7 +73,7 @@ describe('POST /api/runs — validation', () => {
   });
 
   test('400 reports every malformed row at once, not just the first', async () => {
-    const res = await request(app).post('/api/runs').send({
+    const res = await request(app).post('/api/run').send({
       beforeRows: [
         { endpoint: '', kind: 'field', field: 'a', type: 'string', required: true },
         { endpoint: 'POST /x', kind: 'nonsense', field: 'b', type: 'string', required: true },
@@ -84,13 +84,13 @@ describe('POST /api/runs — validation', () => {
   });
 
   test('422 on duplicate composite keys (well-formed rows, semantic violation)', async () => {
-    const res = await request(app).post('/api/runs').send({ beforeRows: malformedDuplicate, afterRows: after });
+    const res = await request(app).post('/api/run').send({ beforeRows: malformedDuplicate, afterRows: after });
     expect(res.status).toBe(422);
     expect(res.body.error).toMatch(/Duplicate composite key/);
   });
 
   test('422 on an empty table', async () => {
-    const res = await request(app).post('/api/runs').send({ beforeRows: [], afterRows: after });
+    const res = await request(app).post('/api/run').send({ beforeRows: [], afterRows: after });
     expect(res.status).toBe(422);
     expect(res.body.error).toMatch(/non-empty array/);
   });
@@ -98,13 +98,13 @@ describe('POST /api/runs — validation', () => {
 
 describe('run history when the database is unavailable', () => {
   test('GET /api/runs returns 503 rather than hanging or crashing', async () => {
-    const res = await request(app).get('/api/runs');
+    const res = await request(app).get('/api/run');
     expect(res.status).toBe(503);
   });
 
   test('POST /api/runs still succeeds with persisted: false', async () => {
     aiClient.complete.mockResolvedValue('[]');
-    const res = await request(app).post('/api/runs').send({ beforeRows: before, afterRows: after });
+    const res = await request(app).post('/api/run').send({ beforeRows: before, afterRows: after });
     expect(res.status).toBe(200);
     expect(res.body.persisted).toBe(false);
     expect(res.body.runId).toBeNull();
