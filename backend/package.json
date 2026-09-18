@@ -10,10 +10,12 @@
     "test:watch": "NODE_ENV=test jest --watch"
   },
   "dependencies": {
+    "@google/genai": "^2.23.0",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "bcryptjs": "^2.4.3",
     "express": "^4.19.2",
+    "groq-sdk": "^1.6.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.5.0",
     "pdfkit": "^0.15.0"
