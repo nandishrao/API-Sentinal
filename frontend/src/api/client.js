@@ -23,7 +23,7 @@ export function messageFromError(err) {
 }
 
 export async function submitRun(beforeRows, afterRows) {
-  const { data } = await client.post('/runs', { beforeRows, afterRows });
+  const { data } = await client.post('/run', { beforeRows, afterRows });
   return data;
 }
 
