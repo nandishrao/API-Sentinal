@@ -57,7 +57,7 @@ export async function downloadRunAsPdf(changes, summary) {
   const url = URL.createObjectURL(res.data);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `breaking-change-report-${Date.now()}.pdf`;
+  link.download = `API_CHANGE-${Date.now()}.pdf`;
   document.body.appendChild(link);
   link.click();
   link.remove();
